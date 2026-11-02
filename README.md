@@ -12,7 +12,8 @@ The application uses a cropped sample of a watermark to find similar marks acros
 - [Command-line usage](#command-line-usage)
 - [How watermark removal works](#how-watermark-removal-works)
 - [Compression and exact file sizes](#compression-and-exact-file-sizes)
-- [Architecture](#architecture)
+- [System Architecture](#system-architecture)
+- [Directory Architecture](#directory-architecture)
 - [Settings and local files](#settings-and-local-files)
 - [Printing and scanning](#printing-and-scanning)
 - [Building executables](#building-executables)
@@ -270,48 +271,100 @@ The desktop interface also supports **exact file sizes**. It compresses files th
 
 Exact sizing is available through `tools.resize_file()` and the desktop interface. The CLI `compress` command targets an upper size limit rather than an exact byte count.
 
-## Architecture
+## System Architecture
 
-The project is a Python package with two front ends sharing the processing modules:
+Docs-Utilz runs as a local Python application. Its desktop and command-line interfaces call shared processing functions in the same process. Document processing needs no application server, database, or remote processing API. Printing and scanning cross the process boundary to use operating system tools and device drivers.
 
-```text
-docs-utilz/
-├── docs_utilz/
-│   ├── __init__.py
-│   ├── __main__.py       # Module launch entry point
-│   ├── app.py            # Tkinter interface, previews, preferences, job coordination
-│   ├── cli.py            # Argument parsing and batch commands
-│   ├── engine.py         # Watermark detection and raster/PDF removal
-│   ├── tools.py          # Compression, exact sizing, PDF/image conversion
-│   ├── devices.py        # Windows and Linux printer/scanner bridges
-│   └── ui_theme.py       # Tkinter palettes and widget styling
-├── tests/                # unittest coverage and mocked device integration
-├── packaging/            # PyInstaller spec, build scripts, installers, release tools
-├── pyproject.toml        # Package metadata and executable entry points
-├── requirements.txt      # Runtime dependencies
-├── .gitignore
-└── README.md
+### Components and data flow
+
+```mermaid
+flowchart TB
+    User[User]
+    Files[(Local PDF and image files)]
+    Prefs[(Local settings and saved sample)]
+
+    subgraph App["Docs-Utilz application process"]
+        GUI["Desktop interface<br/>Tkinter main thread"]
+        CLI["Command-line interface<br/>Argument parsing and synchronous execution"]
+        Workers["Background worker threads<br/>Desktop jobs"]
+        Queue["Message queue<br/>Progress, results, and errors"]
+        Engine["Watermark engine<br/>Detection and raster or smart removal"]
+        Tools["Document tools<br/>Compression, exact sizing, and conversion"]
+        Devices["Device bridge<br/>Print and scan requests"]
+    end
+
+    subgraph OS["Operating system and external devices"]
+        Native["Windows: PowerShell, printing APIs, WIA<br/>Linux: CUPS and SANE commands"]
+        Hardware[Printer or scanner]
+    end
+
+    User --> GUI
+    User --> CLI
+    GUI -->|Capture settings and start job| Workers
+    CLI --> Engine
+    CLI --> Tools
+    Workers --> Engine
+    Workers --> Tools
+    Workers --> Devices
+    Workers -->|Publish job messages| Queue
+    Queue -->|Polled by Tkinter event loop| GUI
+    GUI <-->|Load and save preferences| Prefs
+    Files -->|Read documents and watermark samples| Engine
+    Files -->|Read source documents| Tools
+    Engine -->|Write cleaned files| Files
+    Tools -->|Write resized or converted files| Files
+    Devices <-->|Read print input or save scan output| Files
+    Devices --> Native
+    Native <--> Hardware
 ```
 
-The watermark processing flow is:
+The desktop interface captures widget values on the main thread before starting a worker. That worker calls the selected processing function and reports progress through callbacks. Progress, completion, and error messages return through a queue that the Tkinter event loop polls roughly every 100 milliseconds. The main thread then updates previews, status labels, and activity logs.
 
-```text
-GUI or CLI
-    │
-    ├── Input document + cropped sample + Settings
-    │       │
-    │       └── engine.py
-    │             ├── Render/load → detect → verify matches
-    │             ├── Raster cleanup → encode page images
-    │             └── Smart cleanup → redact PDF objects
-    │
-    ├── Compression / conversion → tools.py
-    └── Print / scan → devices.py → operating system tools and drivers
+The CLI calls the same watermark and document functions synchronously and prints progress to the terminal. Printing, scanning, and exact file sizing are exposed through the desktop interface or Python functions; the CLI currently offers watermark removal, compression, and the two conversion commands.
+
+| Component | Responsibility | Main dependencies |
+| --- | --- | --- |
+| Watermark engine | Render or load pages, find sample matches, verify shapes, apply cleanup, and write results | PyMuPDF, OpenCV, NumPy, Pillow |
+| Document tools | Search compression settings, add exact-size padding, render PDF pages, and assemble images into PDFs | PyMuPDF, Pillow, Python standard library |
+| Device bridge | Discover devices, invoke native print/scan operations, and convert acquired images when needed | System commands, PowerShell/WIA on Windows, CUPS/SANE on Linux, document tools |
+| Desktop coordinator | Read user choices, launch workers, consume messages, show previews, and persist preferences | Tkinter, threading, queue, shared processing modules |
+| CLI coordinator | Parse arguments, invoke processing functions, print progress, and return exit statuses | argparse, shared processing modules |
+
+### Watermark processing pipeline
+
+```mermaid
+flowchart TD
+    Input["Input document + cropped watermark sample + Settings"]
+    Load["Load sample and trim flat borders"]
+    Render["Render a PDF page or load an image"]
+    Detect["Search scales and optional angles<br/>Collect template matches"]
+    Verify["Suppress duplicate regions<br/>Verify stroke shape agreement"]
+    Preview{"Preview or process?"}
+    Show["Return annotated and cleaned previews<br/>with detected regions"]
+    Mode{"Input and removal mode"}
+    Raster["Raster cleanup<br/>Apply fill strategy to pixels"]
+    Smart["Smart PDF cleanup<br/>Map pixels to PDF points and redact selected objects"]
+    Encode["Encode cleaned picture<br/>or image-based PDF pages"]
+    Save["Save processed output"]
+    Report["Return match counts and processing report"]
+
+    Input --> Load --> Render --> Detect --> Verify --> Preview
+    Preview -->|Preview| Show
+    Preview -->|Process| Mode
+    Mode -->|Image input or raster PDF mode| Raster
+    Mode -->|PDF input with smart mode| Smart
+    Raster --> Encode --> Save
+    Smart --> Save
+    Save --> Report
 ```
 
-`engine.Settings` carries detection and removal options. `engine.Match` describes a detected region. Processing functions accept progress callbacks, allowing the GUI and CLI to share the same operations while displaying progress differently.
+For a PDF, page processing repeats according to the selected mode and page range. Raster output reconstructs all PDF pages as images, including pages excluded from watermark removal. Smart output edits the original PDF's selected regions and preserves the remaining document structure.
 
-The desktop application runs long operations in worker threads and sends progress/results through a queue. Tkinter widget access stays on the main thread. Theme configuration is isolated in `ui_theme.py`; device-specific subprocesses and PowerShell code live in `devices.py`.
+The preview function uses raster cleanup to illustrate the detected regions, even when smart mode is selected. Smart-mode output must therefore be checked separately after saving.
+
+`engine.Settings` carries the operation's parameters; `engine.Match` represents a detected region. A match is evidence of visual similarity, so previews and reported counts should be assessed alongside the saved result. The distinction between raster and smart output is explained in [How watermark removal works](#how-watermark-removal-works).
+
+Compression follows a separate path: source file → candidate encodings → size checks → chosen output. Exact sizing adds format-specific padding after compression when necessary. Conversion either renders PDF pages into images or inserts ordered images into a new PDF. These operations share the document tools rather than passing through watermark detection.
 
 ### Using the processing API
 
@@ -332,6 +385,29 @@ print(report)
 The report includes the total page count, processed page count, match count, and per-page counts. Python API page selections use zero-based indexes, for example `Settings(pages=(0, 1, 2, 6))`; the CLI accepts one-based page numbers.
 
 Choose a separate output path when calling processing functions directly. Output naming and overwrite checks vary by operation; do not assume every low-level function has the same protections as the GUI.
+
+## Directory Architecture
+
+The source package, tests, and build tooling are organized as follows:
+
+```text
+docs-utilz/
+├── docs_utilz/
+│   ├── __init__.py
+│   ├── __main__.py       # Module launch entry point
+│   ├── app.py            # Tkinter interface, previews, preferences, job coordination
+│   ├── cli.py            # Argument parsing and batch commands
+│   ├── engine.py         # Watermark detection and raster/PDF removal
+│   ├── tools.py          # Compression, exact sizing, PDF/image conversion
+│   ├── devices.py        # Windows and Linux printer/scanner bridges
+│   └── ui_theme.py       # Tkinter palettes and widget styling
+├── tests/                # unittest coverage and mocked device integration
+├── packaging/            # PyInstaller spec, build scripts, installers, release tools
+├── pyproject.toml        # Package metadata and executable entry points
+├── requirements.txt      # Runtime dependencies
+├── .gitignore
+└── README.md
+```
 
 ## Settings and local files
 
