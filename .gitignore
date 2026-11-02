@@ -1,0 +1,38 @@
+# Local documentation and agent state
+*.[mM][dD]
+!/README.md
+.claude/
+.codex/
+.agents/
+.impeccable/
+.aws/
+
+# Python environments and generated files
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.buildenv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Local configuration and processed documents
+.env
+.env.*
+!.env.example
+settings.json
+watermark.png
+.write_test
+outputs/
+
+# Editor and operating system files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

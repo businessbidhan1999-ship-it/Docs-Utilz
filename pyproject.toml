@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docs-utilz"
+version = "2.1.1"
+description = "Local document tools for watermark removal, file size adjustment, and PDF/image conversion"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.scripts]
+docs-utilz = "docs_utilz.cli:main"
+
+[project.gui-scripts]
+docs-utilz-gui = "docs_utilz.app:main"
+
+[tool.setuptools.packages.find]
+include = ["docs_utilz*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
